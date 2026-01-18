@@ -11,7 +11,7 @@ base = nta[[nta_id, "geometry"]].copy()
 
 restaurants = pd.read_csv("data/restaurants.csv", low_memory=False)
 restaurants["Latitude"] = pd.to_numeric(restaurants["Latitude"], errors="coerce")
-restaurants["Longitude"] = pd.to_numeric(restaurants["Longitude"], errors="coerce")
+restaurants["Longitude"] = pd.to_numeriac(restaurants["Longitude"], errors="coerce")
 restaurants = restaurants.dropna(subset=["Latitude", "Longitude"])
 restaurants_gdf = gpd.GeoDataFrame(
     restaurants,
