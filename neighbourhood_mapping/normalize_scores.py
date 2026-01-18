@@ -57,6 +57,10 @@ out = out.merge(nta_names, on=nta_id, how="left")
 
 out = out[[nta_id, name_col] + score_cols + ["overall_score"]]
 
+rent = pd.read_csv("results/nta_rent.csv")
+rent = rent.rename(columns={"median_gross_rent_usd": "median_gross_rent"})
+
+out = out.merge(rent, on=nta_id, how="left")
 
 out.to_csv("results/nta_scores_all.csv", index=False)
 
