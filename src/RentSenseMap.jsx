@@ -82,22 +82,27 @@ export default function RentSenseMap() {
       .then(res => res.json())
       .then(data => {
         setNtaData(data);
-        const hoods = data.features.map(f => {
-          const scores = generateScores(f.properties.nta2020);
-          const coords = f.geometry.coordinates[0][0];
-          const center = coords.length > 0 ? [
-            coords.reduce((sum, c) => sum + c[1], 0) / coords.length,
-            coords.reduce((sum, c) => sum + c[0], 0) / coords.length
-          ] : [40.7128, -74.006];
-          return {
-            id: f.properties.nta2020,
-            name: f.properties.ntaname,
-            borough: f.properties.boroname,
-            scores, center,
-            rent: 1500 + Math.floor(Math.random() * 3500),
-            listings: 10 + Math.floor(Math.random() * 50)
-          };
-        });
+        // Only include actual neighborhoods (ntatype 0), not parks/cemeteries/etc
+        const hoods = data.features
+          .filter(f => f.properties.ntatype === "0")
+          .map(f => {
+            const scores = generateScores(f.properties.nta2020);
+            const coords = f.geometry.type === 'MultiPolygon' 
+              ? f.geometry.coordinates[0][0]
+              : f.geometry.coordinates[0];
+            const center = coords && coords.length > 0 ? [
+              coords.reduce((sum, c) => sum + c[1], 0) / coords.length,
+              coords.reduce((sum, c) => sum + c[0], 0) / coords.length
+            ] : [40.7128, -74.006];
+            return {
+              id: f.properties.nta2020,
+              name: f.properties.ntaname,
+              borough: f.properties.boroname,
+              scores, center,
+              rent: 1500 + Math.floor(Math.random() * 3500),
+              listings: 10 + Math.floor(Math.random() * 50)
+            };
+          });
         setNeighborhoods(hoods);
       })
       .catch(err => console.error('Error loading GeoJSON:', err));
@@ -131,10 +136,13 @@ export default function RentSenseMap() {
     const scores = generateScores(feature.properties.nta2020);
     const score = calculateScore(scores, userWeights);
     
+    const ntaName = feature.properties.ntaname;
+    const boroName = feature.properties.boroname || '';
+    
     layer.bindTooltip(`
-      <div style="font-family: system-ui, sans-serif; padding: 8px;">
-        <div style="font-weight: 700; font-size: 16px; color: #1f2937; margin-bottom: 4px;">${feature.properties.ntaname}</div>
-        <div style="color: #6b7280; font-size: 14px; margin-bottom: 8px;">${feature.properties.boroname}</div>
+      <div style="font-family: system-ui, sans-serif; padding: 8px; min-width: 150px;">
+        <div style="font-weight: 700; font-size: 16px; color: #1f2937; margin-bottom: 4px;">${ntaName}</div>
+        <div style="color: #6b7280; font-size: 14px; margin-bottom: 8px;">${boroName}</div>
         <div style="font-size: 28px; font-weight: 800; color: #059669;">${(score * 100).toFixed(1)}</div>
         <div style="font-size: 12px; color: #9ca3af;">Match Score</div>
       </div>
@@ -148,12 +156,56 @@ export default function RentSenseMap() {
     });
   };
 
-  // Filter by budget and sort
-  const sortedNeighborhoods = [...neighborhoods]
-    .map(n => ({ ...n, totalScore: calculateScore(n.scores, userWeights) }))
-    .filter(n => n.rent >= budgetMin && n.rent <= budgetMax)
-    .sort((a, b) => b.totalScore - a.totalScore)
-    .slice(0, 20);
+  // Filter by budget and sort - use backend results if available
+  const sortedNeighborhoods = React.useMemo(() => {
+    if (backendResults && backendResults.length > 0) {
+      return backendResults.map((r, i) => {
+        // Try to find matching neighborhood from GeoJSON for coordinates
+        const ntaCode = r.nta2020 || r.NTA2020 || '';
+        const matchedHood = neighborhoods.find(n => n.id === ntaCode);
+        
+        return {
+          id: ntaCode || `result-${i}`,
+          name: r.ntaname || r.NTAName || r.neighborhood || 'Unknown',
+          borough: r.boroname || r.Borough || r.borough || 'NYC',
+          totalScore: r.fit_index || r.score || 0,
+          rent: r.median_rent || r.rent || 3500,
+          listings: r.listings || 30,
+          center: matchedHood?.center || [40.7128, -74.006],
+          scores: {
+            commute: r.commute_score || 0.7,
+            safety: r.safety_score || 0.7,
+            noise: r.quiet_score || 0.7,
+            amenities: r.amenities_score || 0.7,
+            greenSpace: r.parks_score || 0.7,
+            jobs: r.jobs_score || 0.7,
+            education: r.schools_score || 0.7,
+            political: r.politics_score || 0.7
+          }
+        };
+      });
+    }
+    
+    return [...neighborhoods]
+      .map(n => ({ ...n, totalScore: calculateScore(n.scores, userWeights) }))
+      .filter(n => n.rent >= budgetMin && n.rent <= budgetMax)
+      .sort((a, b) => b.totalScore - a.totalScore)
+      .slice(0, 10);
+  }, [backendResults, neighborhoods, userWeights, budgetMin, budgetMax]);
+
+  // Map frontend weight names to backend format
+  const mapToBackendWeights = (weights) => {
+    return {
+      "Commute Convenience": weights.commute || 1,
+      "Safety": weights.safety || 1,
+      "Noise": weights.noise || 1,
+      "Amenity Convenience": weights.amenities || 1,
+      "Green Space Accessibility": weights.greenSpace || 1,
+      "Job Opportunities": weights.jobs || 1,
+      "Education Access": weights.education || 1,
+      "Political Leaning": weights.political || 1
+    };
+  };
 
   // ============================================================
   // BACKEND API INTEGRATION
@@ -194,7 +246,7 @@ export default function RentSenseMap() {
         selected_options: null,
         last_question_data: null,
         mode: mode,
-        weights: userWeights,
+        weights: mapToBackendWeights(userWeights),
         conversation_history: conversationHistory,
         questions_asked: questionsAsked,
         dimensions_covered: dimensionsCovered
@@ -213,15 +265,9 @@ export default function RentSenseMap() {
     }
   };
 
-  // Handle MCQ option selection
+  // Handle MCQ option selection (single select)
   const handleOptionSelect = (optionId) => {
-    setSelectedOptions(prev => {
-      if (prev.includes(optionId)) {
-        return prev.filter(id => id !== optionId);
-      } else {
-        return [...prev, optionId];
-      }
-    });
+    setSelectedOptions([optionId]); // Single select - replace instead of toggle
   };
 
   // Submit selected MCQ options
@@ -231,10 +277,7 @@ export default function RentSenseMap() {
     setIsLoading(true);
     
     // Add user selection to chat
-    const selectedLabels = currentQuestion?.options
-      ?.filter(opt => selectedOptions.includes(opt.id))
-      ?.map(opt => opt.label)
-      ?.join(', ');
+    const selectedLabels = selectedOptions.join(', ');
     
     setChatMessages(prev => [...prev, { role: 'user', content: selectedLabels }]);
 
@@ -244,7 +287,7 @@ export default function RentSenseMap() {
         selected_options: selectedOptions,
         last_question_data: currentQuestion,
         mode: mode,
-        weights: userWeights,
+        weights: mapToBackendWeights(userWeights),
         conversation_history: conversationHistory,
         questions_asked: questionsAsked,
         dimensions_covered: dimensionsCovered
@@ -264,10 +307,49 @@ export default function RentSenseMap() {
     }
   };
 
+  // Map backend dimension names to frontend names
+  const mapBackendWeights = (weights) => {
+    const mapping = {
+      "Commute Convenience": "commute",
+      "Safety": "safety",
+      "Noise": "noise",
+      "Amenity Convenience": "amenities",
+      "Green Space Accessibility": "greenSpace",
+      "Job Opportunities": "jobs",
+      "Education Access": "education",
+      "Political Leaning": "political",
+      // Also handle if already in frontend format
+      "commute": "commute",
+      "safety": "safety",
+      "noise": "noise",
+      "amenities": "amenities",
+      "greenSpace": "greenSpace",
+      "jobs": "jobs",
+      "education": "education",
+      "political": "political"
+    };
+    
+    const mapped = {
+      commute: 1, safety: 1, noise: 1, amenities: 1,
+      greenSpace: 1, jobs: 1, education: 1, political: 1
+    };
+    
+    Object.entries(weights).forEach(([key, value]) => {
+      const frontendKey = mapping[key];
+      if (frontendKey) {
+        mapped[frontendKey] = value;
+      }
+    });
+    
+    return mapped;
+  };
+
   // Handle backend response
   const handleBackendResponse = (data) => {
-    // Update all state from backend
-    setUserWeights(data.weights);
+    // Map weights from backend format to frontend format
+    const mappedWeights = mapBackendWeights(data.weights);
+    setUserWeights(mappedWeights);
+    
     setConversationHistory(data.conversation_history);
     setQuestionsAsked(data.questions_asked);
     setDimensionsCovered(data.dimensions_covered);
@@ -440,7 +522,17 @@ export default function RentSenseMap() {
               attribution='&copy; CARTO'
               url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
             />
-            <GeoJSON key={geoJsonKey} data={ntaData} style={getStyle} onEachFeature={onEachFeature} />
+            {ntaData && (
+              <GeoJSON 
+                key={geoJsonKey} 
+                data={{
+                  ...ntaData,
+                  features: ntaData.features.filter(f => f.properties.ntatype === "0")
+                }} 
+                style={getStyle} 
+                onEachFeature={onEachFeature} 
+              />
+            )}
             <MapController selected={selectedNeighborhood} />
           </MapContainer>
 
@@ -502,7 +594,7 @@ export default function RentSenseMap() {
                       <div style={{
                         width: `${Math.min((value / 2) * 100, 100)}%`,
                         height: '100%',
-                        background: value > 1.2 ? '#059669' : value < 0.8 ? '#dc2626' : '#9ca3af',
+                        background: '#059669',
                         borderRadius: '4px',
                         transition: 'width 0.3s ease'
                       }} />
@@ -662,28 +754,35 @@ export default function RentSenseMap() {
                     border: '1px solid #e5e7eb'
                   }}>
                     <p style={{ fontSize: '13px', color: '#6b7280', margin: '0 0 12px' }}>
-                      Select one or more options:
+                      Select an option:
                     </p>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                      {currentQuestion.options.map((opt) => (
-                        <button
-                          key={opt.id}
-                          onClick={() => handleOptionSelect(opt.id)}
-                          style={{
-                            padding: '12px 16px',
-                            background: selectedOptions.includes(opt.id) ? '#ecfdf5' : '#fff',
-                            border: selectedOptions.includes(opt.id) ? '2px solid #059669' : '1px solid #e5e7eb',
-                            borderRadius: '10px',
-                            textAlign: 'left',
-                            cursor: 'pointer',
-                            fontSize: '14px',
-                            color: '#374151',
-                            transition: 'all 0.15s ease'
-                          }}
-                        >
-                          {selectedOptions.includes(opt.id) ? '✓ ' : ''}{opt.label}
-                        </button>
-                      ))}
+                      {currentQuestion.options.map((opt, index) => {
+                        // Handle both string array and object array formats
+                        const optionId = typeof opt === 'string' ? opt : opt.id;
+                        const optionLabel = typeof opt === 'string' ? opt : opt.label;
+                        const isSelected = selectedOptions.includes(optionId);
+                        
+                        return (
+                          <button
+                            key={index}
+                            onClick={() => handleOptionSelect(optionId)}
+                            style={{
+                              padding: '12px 16px',
+                              background: isSelected ? '#ecfdf5' : '#fff',
+                              border: isSelected ? '2px solid #059669' : '1px solid #e5e7eb',
+                              borderRadius: '10px',
+                              textAlign: 'left',
+                              cursor: 'pointer',
+                              fontSize: '14px',
+                              color: '#374151',
+                              transition: 'all 0.15s ease'
+                            }}
+                          >
+                            {isSelected ? '✓ ' : ''}{optionLabel}
+                          </button>
+                        );
+                      })}
                     </div>
                     <button
                       onClick={submitOptions}
@@ -902,10 +1001,12 @@ export default function RentSenseMap() {
             background: '#fff'
           }}>
             <h2 style={{ fontSize: '24px', fontWeight: '700', color: '#1f2937', margin: '0 0 4px' }}>
-              Top Matches
+              {backendResults ? '🎯 Your Top Matches' : 'Top Matches'}
             </h2>
             <p style={{ fontSize: '15px', color: '#6b7280', margin: 0 }}>
-              {sortedNeighborhoods.length} neighborhoods in your budget
+              {backendResults 
+                ? `${sortedNeighborhoods.length} AI-personalized recommendations`
+                : `${sortedNeighborhoods.length} neighborhoods in your budget`}
             </p>
           </div>
 

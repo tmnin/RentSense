@@ -28,3 +28,15 @@ html, body, #root {
 .leaflet-container {
   background: #0a0f1a;
 }
+
+/* Custom tooltip override */
+.custom-tooltip {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3) !important;
+  padding: 0 !important;
+}
+
+.custom-tooltip .leaflet-tooltip-content {
+  margin: 0 !important;
+}
