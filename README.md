@@ -1,16 +1,13 @@
-# React + Vite
+# RentSense
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+RentSense is a multi-criteria decision analysis tool that helps you find where you should live - not just where you can. 
 
-Currently, two official plugins are available:
+Our team built a data pipeline that aggregates multiple open public datasets, like NYPD crime reports and rent data, into a single, consistent geographic unit: New York City Neighbourhood Tabulation Areas (NTAs). We rate every individual NTA on criteria like safety, amenity access, and commute time, and assign each NTA an overall "fit index" calculated with a summation algorithm. 
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+The exact weight of each criterion is completely adjustable. Users who may have a difficult time quantifying their preferences can utilize our implementation of Google Gemini's API. The agent will ask specific, detailed questions, and adjust the weights of each category accordingly. If they prefer, users may also directly adjust the weights themselves using interactive sliders. 
 
-## React Compiler
+Our tool is the first on the market to offer relocation recommendations that are tailored to individual preferences. Outside of calculating a fit index, our tool also calculates "return upon investment" - in other words, how much fit does this location offer you, considering average rent costs? 
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+You choose: best fit or best value.
 
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Built for NexHacks @ CMU, 2026
