@@ -61,6 +61,7 @@ rent = pd.read_csv("results/nta_rent.csv")
 rent = rent.rename(columns={"median_gross_rent_usd": "median_gross_rent"})
 
 out = out.merge(rent, on=nta_id, how="left")
+out["median_gross_rent"] = out["median_gross_rent"].fillna(0.0)
 
 out.to_csv("results/nta_scores_all.csv", index=False)
 
