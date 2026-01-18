@@ -13,7 +13,10 @@ const weightConfig = {
   political: { label: "Political", icon: "🗳️" }
 };
 
-// Generate deterministic scores
+// API Base URL - change this for production
+const API_BASE = 'http://localhost:8000';
+
+// Generate deterministic scores (fallback for demo)
 const generateScores = (ntaCode) => {
   const seed = ntaCode?.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) || 0;
   const random = (offset) => ((seed + offset) % 100) / 100 * 0.5 + 0.4;
@@ -59,12 +62,20 @@ export default function RentSenseMap() {
   const [budgetMin, setBudgetMin] = useState(1500);
   const [budgetMax, setBudgetMax] = useState(5000);
   
-  // Chat state
+  // Chat state - connected to backend
   const [showChat, setShowChat] = useState(false);
   const [chatInput, setChatInput] = useState('');
-  const [chatMessages, setChatMessages] = useState([
-    { role: 'assistant', content: "Hi! Tell me what you're looking for in a neighborhood. For example: 'I want somewhere quiet near good schools' or 'Safety and short commute are my priorities.'" }
-  ]);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+  
+  // Backend conversation state
+  const [conversationHistory, setConversationHistory] = useState([]);
+  const [questionsAsked, setQuestionsAsked] = useState(0);
+  const [dimensionsCovered, setDimensionsCovered] = useState([]);
+  const [currentQuestion, setCurrentQuestion] = useState(null);
+  const [selectedOptions, setSelectedOptions] = useState([]);
+  const [backendResults, setBackendResults] = useState(null);
+  const [mode, setMode] = useState('discovery'); // 'discovery' or 'migration'
 
   useEffect(() => {
     fetch('/nta.geojson')
@@ -144,48 +155,155 @@ export default function RentSenseMap() {
     .sort((a, b) => b.totalScore - a.totalScore)
     .slice(0, 20);
 
-  // Handle chat - this is where you'd connect to Gemini
+  // ============================================================
+  // BACKEND API INTEGRATION
+  // ============================================================
+  const callBackendAPI = async (payload) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      
+      if (!response.ok) {
+        throw new Error(`API Error: ${response.status}`);
+      }
+      
+      return await response.json();
+    } catch (error) {
+      console.error('Backend API Error:', error);
+      throw error;
+    }
+  };
+
+  // Handle initial user message
   const handleChat = async () => {
-    if (!chatInput.trim()) return;
+    if (!chatInput.trim() || isLoading) return;
     
     const userMessage = chatInput;
-    setChatMessages(prev => [...prev, { role: 'user', content: userMessage }]);
     setChatInput('');
+    setIsLoading(true);
+    
+    // Add user message to chat
+    setChatMessages(prev => [...prev, { role: 'user', content: userMessage }]);
 
-    // ============================================================
-    // BACKEND INTEGRATION POINT
-    // Replace this mock logic with your Gemini API call:
-    //
-    // const response = await fetch('/api/parse-preferences', {
-    //   method: 'POST',
-    //   body: JSON.stringify({ message: userMessage }),
-    // });
-    // const { newWeights, aiResponse } = await response.json();
-    // setUserWeights(newWeights);
-    // setChatMessages(prev => [...prev, { role: 'assistant', content: aiResponse }]);
-    // ============================================================
+    try {
+      const payload = {
+        user_input: userMessage,
+        selected_options: null,
+        last_question_data: null,
+        mode: mode,
+        weights: userWeights,
+        conversation_history: conversationHistory,
+        questions_asked: questionsAsked,
+        dimensions_covered: dimensionsCovered
+      };
 
-    // Mock weight adjustment (replace with real API call)
-    const input = userMessage.toLowerCase();
-    const newWeights = { ...userWeights };
-    let changes = [];
+      const data = await callBackendAPI(payload);
+      handleBackendResponse(data);
+      
+    } catch (error) {
+      setChatMessages(prev => [...prev, { 
+        role: 'assistant', 
+        content: 'Sorry, there was an error connecting to the server. Make sure the backend is running on localhost:8000' 
+      }]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Handle MCQ option selection
+  const handleOptionSelect = (optionId) => {
+    setSelectedOptions(prev => {
+      if (prev.includes(optionId)) {
+        return prev.filter(id => id !== optionId);
+      } else {
+        return [...prev, optionId];
+      }
+    });
+  };
+
+  // Submit selected MCQ options
+  const submitOptions = async () => {
+    if (selectedOptions.length === 0 || isLoading) return;
     
-    if (input.includes('safe')) { newWeights.safety = Math.min(2, newWeights.safety + 0.3); changes.push('Safety ↑'); }
-    if (input.includes('quiet') || input.includes('peace')) { newWeights.noise = Math.min(2, newWeights.noise + 0.3); changes.push('Quiet ↑'); }
-    if (input.includes('commute') || input.includes('transit') || input.includes('subway')) { newWeights.commute = Math.min(2, newWeights.commute + 0.3); changes.push('Commute ↑'); }
-    if (input.includes('park') || input.includes('green') || input.includes('nature')) { newWeights.greenSpace = Math.min(2, newWeights.greenSpace + 0.3); changes.push('Green Space ↑'); }
-    if (input.includes('restaurant') || input.includes('shop') || input.includes('store') || input.includes('food')) { newWeights.amenities = Math.min(2, newWeights.amenities + 0.3); changes.push('Amenities ↑'); }
-    if (input.includes('school') || input.includes('education') || input.includes('kid') || input.includes('children')) { newWeights.education = Math.min(2, newWeights.education + 0.3); changes.push('Education ↑'); }
-    if (input.includes('job') || input.includes('work') || input.includes('career') || input.includes('office')) { newWeights.jobs = Math.min(2, newWeights.jobs + 0.3); changes.push('Jobs ↑'); }
+    setIsLoading(true);
     
-    setUserWeights(newWeights);
+    // Add user selection to chat
+    const selectedLabels = currentQuestion?.options
+      ?.filter(opt => selectedOptions.includes(opt.id))
+      ?.map(opt => opt.label)
+      ?.join(', ');
     
-    // Mock AI response (replace with real response from Gemini)
-    const aiResponse = changes.length > 0 
-      ? `Got it! I've adjusted your preferences: ${changes.join(', ')}. The map has been updated with your new priorities. Anything else you'd like to adjust?`
-      : "I understood your message, but I couldn't identify specific preferences. Try mentioning things like safety, quiet, commute, schools, parks, restaurants, or jobs.";
-    
-    setChatMessages(prev => [...prev, { role: 'assistant', content: aiResponse }]);
+    setChatMessages(prev => [...prev, { role: 'user', content: selectedLabels }]);
+
+    try {
+      const payload = {
+        user_input: null,
+        selected_options: selectedOptions,
+        last_question_data: currentQuestion,
+        mode: mode,
+        weights: userWeights,
+        conversation_history: conversationHistory,
+        questions_asked: questionsAsked,
+        dimensions_covered: dimensionsCovered
+      };
+
+      const data = await callBackendAPI(payload);
+      setSelectedOptions([]); // Reset selections
+      handleBackendResponse(data);
+      
+    } catch (error) {
+      setChatMessages(prev => [...prev, { 
+        role: 'assistant', 
+        content: 'Sorry, there was an error. Please try again.' 
+      }]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Handle backend response
+  const handleBackendResponse = (data) => {
+    // Update all state from backend
+    setUserWeights(data.weights);
+    setConversationHistory(data.conversation_history);
+    setQuestionsAsked(data.questions_asked);
+    setDimensionsCovered(data.dimensions_covered);
+
+    if (data.next_step === 'ask_question' && data.question) {
+      // Show the question
+      setCurrentQuestion(data.question);
+      setChatMessages(prev => [...prev, { 
+        role: 'assistant', 
+        content: data.question.question,
+        isQuestion: true
+      }]);
+    } else if (data.next_step === 'show_results' && data.results) {
+      // Show results
+      setBackendResults(data.results);
+      setCurrentQuestion(null);
+      setChatMessages(prev => [...prev, { 
+        role: 'assistant', 
+        content: `Based on your preferences, I found your top matches! Check the map and listings panel for your personalized recommendations.` 
+      }]);
+    }
+  };
+
+  // Reset conversation
+  const resetConversation = () => {
+    setChatMessages([]);
+    setConversationHistory([]);
+    setQuestionsAsked(0);
+    setDimensionsCovered([]);
+    setCurrentQuestion(null);
+    setSelectedOptions([]);
+    setBackendResults(null);
+    setUserWeights({
+      commute: 1, safety: 1, noise: 1, amenities: 1,
+      greenSpace: 1, jobs: 1, education: 1, political: 1
+    });
   };
 
   // Loading state
@@ -268,11 +386,7 @@ export default function RentSenseMap() {
                 step="100"
                 value={budgetMin}
                 onChange={(e) => setBudgetMin(Math.min(Number(e.target.value), budgetMax - 500))}
-                style={{
-                  width: '120px',
-                  accentColor: '#059669',
-                  cursor: 'pointer'
-                }}
+                style={{ width: '120px', accentColor: '#059669', cursor: 'pointer' }}
               />
               <span style={{ fontSize: '12px', color: '#9ca3af', width: '35px' }}>Max</span>
               <input
@@ -282,11 +396,7 @@ export default function RentSenseMap() {
                 step="100"
                 value={budgetMax}
                 onChange={(e) => setBudgetMax(Math.max(Number(e.target.value), budgetMin + 500))}
-                style={{
-                  width: '120px',
-                  accentColor: '#059669',
-                  cursor: 'pointer'
-                }}
+                style={{ width: '120px', accentColor: '#059669', cursor: 'pointer' }}
               />
             </div>
           </div>
@@ -347,27 +457,41 @@ export default function RentSenseMap() {
             border: '1px solid #e5e7eb',
             zIndex: 1000
           }}>
-            <h3 style={{ fontSize: '18px', fontWeight: '700', color: '#1f2937', margin: '0 0 4px' }}>
-              Your Preferences
-            </h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+              <h3 style={{ fontSize: '18px', fontWeight: '700', color: '#1f2937', margin: 0 }}>
+                Your Preferences
+              </h3>
+              {questionsAsked > 0 && (
+                <span style={{ 
+                  fontSize: '11px', 
+                  color: '#059669', 
+                  background: '#ecfdf5', 
+                  padding: '4px 8px', 
+                  borderRadius: '6px',
+                  fontWeight: '600'
+                }}>
+                  {questionsAsked}/4 questions
+                </span>
+              )}
+            </div>
             <p style={{ fontSize: '14px', color: '#6b7280', margin: '0 0 20px' }}>
-              Adjust to personalize results
+              {questionsAsked > 0 ? 'Updated from your answers' : 'Use chat to personalize'}
             </p>
             
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
               {Object.entries(userWeights).map(([key, value]) => (
                 <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <span style={{ fontSize: '20px', width: '32px' }}>{weightConfig[key].icon}</span>
+                  <span style={{ fontSize: '20px', width: '32px' }}>{weightConfig[key]?.icon || '📊'}</span>
                   <div style={{ flex: 1 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
                       <span style={{ fontSize: '15px', color: '#374151', fontWeight: '500' }}>
-                        {weightConfig[key].label}
+                        {weightConfig[key]?.label || key}
                       </span>
                       <span style={{ 
                         fontSize: '15px', 
                         fontWeight: '700',
-                        color: value > 1.2 ? '#059669' : '#6b7280'
-                      }}>{value.toFixed(1)}</span>
+                        color: value > 1.2 ? '#059669' : value < 0.8 ? '#dc2626' : '#6b7280'
+                      }}>{value.toFixed(2)}</span>
                     </div>
                     <div style={{
                       height: '8px',
@@ -376,9 +500,9 @@ export default function RentSenseMap() {
                       overflow: 'hidden'
                     }}>
                       <div style={{
-                        width: `${(value / 2) * 100}%`,
+                        width: `${Math.min((value / 2) * 100, 100)}%`,
                         height: '100%',
-                        background: '#059669',
+                        background: value > 1.2 ? '#059669' : value < 0.8 ? '#dc2626' : '#9ca3af',
                         borderRadius: '4px',
                         transition: 'width 0.3s ease'
                       }} />
@@ -420,14 +544,14 @@ export default function RentSenseMap() {
             </div>
           </div>
 
-          {/* CHAT PANEL */}
+          {/* CHAT PANEL - Connected to FastAPI */}
           {showChat && (
             <div style={{
               position: 'absolute',
               bottom: '24px',
               right: '24px',
-              width: '400px',
-              height: '450px',
+              width: '420px',
+              height: '500px',
               background: '#fff',
               borderRadius: '20px',
               boxShadow: '0 8px 40px rgba(0,0,0,0.15)',
@@ -450,22 +574,39 @@ export default function RentSenseMap() {
                     AI Preference Assistant
                   </h4>
                   <p style={{ fontSize: '13px', color: '#6b7280', margin: '4px 0 0' }}>
-                    Describe what matters to you
+                    {questionsAsked === 0 ? 'Describe what matters to you' : `Question ${questionsAsked} of 4`}
                   </p>
                 </div>
-                <button
-                  onClick={() => setShowChat(false)}
-                  style={{
-                    width: '36px',
-                    height: '36px',
-                    background: '#f3f4f6',
-                    border: 'none',
-                    borderRadius: '10px',
-                    color: '#6b7280',
-                    cursor: 'pointer',
-                    fontSize: '18px'
-                  }}
-                >✕</button>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  {questionsAsked > 0 && (
+                    <button
+                      onClick={resetConversation}
+                      style={{
+                        padding: '8px 12px',
+                        background: '#fee2e2',
+                        border: 'none',
+                        borderRadius: '8px',
+                        color: '#dc2626',
+                        cursor: 'pointer',
+                        fontSize: '13px',
+                        fontWeight: '600'
+                      }}
+                    >Reset</button>
+                  )}
+                  <button
+                    onClick={() => setShowChat(false)}
+                    style={{
+                      width: '36px',
+                      height: '36px',
+                      background: '#f3f4f6',
+                      border: 'none',
+                      borderRadius: '10px',
+                      color: '#6b7280',
+                      cursor: 'pointer',
+                      fontSize: '18px'
+                    }}
+                  >✕</button>
+                </div>
               </div>
 
               {/* Chat Messages */}
@@ -477,6 +618,23 @@ export default function RentSenseMap() {
                 flexDirection: 'column',
                 gap: '16px'
               }}>
+                {chatMessages.length === 0 && (
+                  <div style={{
+                    padding: '20px',
+                    background: '#f3f4f6',
+                    borderRadius: '16px',
+                    color: '#374151',
+                    fontSize: '15px',
+                    lineHeight: '1.6'
+                  }}>
+                    👋 Hi! Tell me what you're looking for in a neighborhood.<br/><br/>
+                    <strong>Examples:</strong><br/>
+                    • "I want somewhere quiet near good schools"<br/>
+                    • "Safety and short commute are my priorities"<br/>
+                    • "I need lots of restaurants and nightlife"
+                  </div>
+                )}
+                
                 {chatMessages.map((msg, i) => (
                   <div
                     key={i}
@@ -494,44 +652,113 @@ export default function RentSenseMap() {
                     {msg.content}
                   </div>
                 ))}
+
+                {/* MCQ Options */}
+                {currentQuestion && currentQuestion.options && (
+                  <div style={{
+                    background: '#f9fafb',
+                    borderRadius: '16px',
+                    padding: '16px',
+                    border: '1px solid #e5e7eb'
+                  }}>
+                    <p style={{ fontSize: '13px', color: '#6b7280', margin: '0 0 12px' }}>
+                      Select one or more options:
+                    </p>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      {currentQuestion.options.map((opt) => (
+                        <button
+                          key={opt.id}
+                          onClick={() => handleOptionSelect(opt.id)}
+                          style={{
+                            padding: '12px 16px',
+                            background: selectedOptions.includes(opt.id) ? '#ecfdf5' : '#fff',
+                            border: selectedOptions.includes(opt.id) ? '2px solid #059669' : '1px solid #e5e7eb',
+                            borderRadius: '10px',
+                            textAlign: 'left',
+                            cursor: 'pointer',
+                            fontSize: '14px',
+                            color: '#374151',
+                            transition: 'all 0.15s ease'
+                          }}
+                        >
+                          {selectedOptions.includes(opt.id) ? '✓ ' : ''}{opt.label}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      onClick={submitOptions}
+                      disabled={selectedOptions.length === 0 || isLoading}
+                      style={{
+                        width: '100%',
+                        marginTop: '12px',
+                        padding: '12px',
+                        background: selectedOptions.length > 0 ? '#059669' : '#e5e7eb',
+                        border: 'none',
+                        borderRadius: '10px',
+                        color: selectedOptions.length > 0 ? '#fff' : '#9ca3af',
+                        fontSize: '15px',
+                        fontWeight: '600',
+                        cursor: selectedOptions.length > 0 ? 'pointer' : 'not-allowed'
+                      }}
+                    >
+                      {isLoading ? 'Processing...' : 'Continue →'}
+                    </button>
+                  </div>
+                )}
+
+                {isLoading && !currentQuestion && (
+                  <div style={{ 
+                    padding: '14px 18px', 
+                    background: '#f3f4f6', 
+                    borderRadius: '18px',
+                    color: '#6b7280',
+                    fontSize: '14px'
+                  }}>
+                    Thinking...
+                  </div>
+                )}
               </div>
 
-              {/* Chat Input */}
-              <div style={{
-                padding: '16px 20px',
-                borderTop: '1px solid #e5e7eb',
-                display: 'flex',
-                gap: '12px'
-              }}>
-                <input
-                  type="text"
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleChat()}
-                  placeholder="e.g., I want somewhere quiet near good schools..."
-                  style={{
-                    flex: 1,
-                    padding: '14px 18px',
-                    background: '#f9fafb',
-                    border: '1px solid #e5e7eb',
-                    borderRadius: '12px',
-                    fontSize: '15px',
-                    outline: 'none'
-                  }}
-                />
-                <button
-                  onClick={handleChat}
-                  style={{
-                    width: '48px',
-                    background: '#059669',
-                    border: 'none',
-                    borderRadius: '12px',
-                    color: '#fff',
-                    fontSize: '20px',
-                    cursor: 'pointer'
-                  }}
-                >→</button>
-              </div>
+              {/* Chat Input - Only show if no current MCQ question */}
+              {!currentQuestion && (
+                <div style={{
+                  padding: '16px 20px',
+                  borderTop: '1px solid #e5e7eb',
+                  display: 'flex',
+                  gap: '12px'
+                }}>
+                  <input
+                    type="text"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleChat()}
+                    placeholder="Describe your ideal neighborhood..."
+                    disabled={isLoading}
+                    style={{
+                      flex: 1,
+                      padding: '14px 18px',
+                      background: '#f9fafb',
+                      border: '1px solid #e5e7eb',
+                      borderRadius: '12px',
+                      fontSize: '15px',
+                      outline: 'none'
+                    }}
+                  />
+                  <button
+                    onClick={handleChat}
+                    disabled={isLoading || !chatInput.trim()}
+                    style={{
+                      width: '48px',
+                      background: chatInput.trim() ? '#059669' : '#e5e7eb',
+                      border: 'none',
+                      borderRadius: '12px',
+                      color: chatInput.trim() ? '#fff' : '#9ca3af',
+                      fontSize: '20px',
+                      cursor: chatInput.trim() ? 'pointer' : 'not-allowed'
+                    }}
+                  >→</button>
+                </div>
+              )}
             </div>
           )}
 
@@ -599,9 +826,9 @@ export default function RentSenseMap() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', marginBottom: '24px' }}>
                 {Object.entries(selectedNeighborhood.scores).map(([key, value]) => (
                   <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                    <span style={{ fontSize: '18px', width: '28px' }}>{weightConfig[key].icon}</span>
+                    <span style={{ fontSize: '18px', width: '28px' }}>{weightConfig[key]?.icon || '📊'}</span>
                     <span style={{ fontSize: '15px', color: '#6b7280', width: '90px' }}>
-                      {weightConfig[key].label}
+                      {weightConfig[key]?.label || key}
                     </span>
                     <div style={{ 
                       flex: 1, 
@@ -698,22 +925,14 @@ export default function RentSenseMap() {
                     marginBottom: '12px',
                     background: isSelected ? '#ecfdf5' : isHovered ? '#f9fafb' : '#fff',
                     borderRadius: '16px',
-                    border: isSelected 
-                      ? '2px solid #059669' 
-                      : '1px solid #e5e7eb',
+                    border: isSelected ? '2px solid #059669' : '1px solid #e5e7eb',
                     cursor: 'pointer',
                     transition: 'all 0.15s ease',
                     boxShadow: isHovered ? '0 4px 16px rgba(0,0,0,0.06)' : 'none'
                   }}
                 >
                   {/* Top row */}
-                  <div style={{ 
-                    display: 'flex', 
-                    justifyContent: 'space-between', 
-                    alignItems: 'flex-start', 
-                    marginBottom: '12px' 
-                  }}>
-                    {/* Rank Badge */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
                     {index === 0 ? (
                       <div style={{
                         background: 'linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%)',
@@ -734,9 +953,7 @@ export default function RentSenseMap() {
                         borderRadius: '6px',
                         fontSize: '12px',
                         fontWeight: '600'
-                      }}>
-                        🥈 #2
-                      </div>
+                      }}>🥈 #2</div>
                     ) : index === 2 ? (
                       <div style={{
                         background: '#fef3c7',
@@ -745,9 +962,7 @@ export default function RentSenseMap() {
                         borderRadius: '6px',
                         fontSize: '12px',
                         fontWeight: '600'
-                      }}>
-                        🥉 #3
-                      </div>
+                      }}>🥉 #3</div>
                     ) : (
                       <div style={{
                         background: '#f3f4f6',
@@ -756,49 +971,25 @@ export default function RentSenseMap() {
                         borderRadius: '6px',
                         fontSize: '12px',
                         fontWeight: '600'
-                      }}>
-                        #{index + 1}
-                      </div>
+                      }}>#{index + 1}</div>
                     )}
 
-                    {/* Score */}
                     <div style={{ textAlign: 'right' }}>
-                      <div style={{
-                        fontSize: '32px',
-                        fontWeight: '800',
-                        color: '#059669',
-                        lineHeight: 1
-                      }}>
+                      <div style={{ fontSize: '32px', fontWeight: '800', color: '#059669', lineHeight: 1 }}>
                         {(hood.totalScore * 100).toFixed(1)}
                       </div>
                       <div style={{ fontSize: '13px', color: '#9ca3af' }}>match</div>
                     </div>
                   </div>
 
-                  {/* Name */}
-                  <h4 style={{ 
-                    fontSize: '20px', 
-                    fontWeight: '700', 
-                    color: '#1f2937', 
-                    margin: '0 0 4px' 
-                  }}>
+                  <h4 style={{ fontSize: '20px', fontWeight: '700', color: '#1f2937', margin: '0 0 4px' }}>
                     {hood.name}
                   </h4>
-                  <p style={{ 
-                    fontSize: '15px', 
-                    color: '#6b7280', 
-                    margin: '0 0 16px' 
-                  }}>
+                  <p style={{ fontSize: '15px', color: '#6b7280', margin: '0 0 16px' }}>
                     {hood.borough}
                   </p>
 
-                  {/* Meta */}
-                  <div style={{ 
-                    display: 'flex', 
-                    gap: '20px', 
-                    paddingTop: '16px',
-                    borderTop: '1px solid #f3f4f6'
-                  }}>
+                  <div style={{ display: 'flex', gap: '20px', paddingTop: '16px', borderTop: '1px solid #f3f4f6' }}>
                     <div>
                       <div style={{ fontSize: '13px', color: '#9ca3af' }}>Avg. Rent</div>
                       <div style={{ fontSize: '18px', fontWeight: '700', color: '#1f2937' }}>
