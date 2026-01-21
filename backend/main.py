@@ -104,8 +104,8 @@ async def chat_endpoint(req: ChatRequest):
     # ALWAYS Normalize weights before moving forward
     current_weights = engine.normalize_weights(current_weights)
 
-    # 3. Decision: Should we show results?
-    if req.questions_asked >= 4 or len(dims_covered) >= 7:
+    # 3. HARD CAP: Maximum 10 questions
+    if req.questions_asked >= 10:
         results = engine.get_top_neighborhoods(df, current_weights, top_n=10)
         return ChatResponse(
             weights=current_weights,
@@ -116,48 +116,94 @@ async def chat_endpoint(req: ChatRequest):
             results=results
         )
 
-    # 4. Generate Next Question
+    # 4. Let Gemini decide: Ask more questions or show results?
     remaining_dims = [d for d in engine.UI_DIMENSIONS if d not in dims_covered]
-    q_prompt = f"""Based on conversation history: {history}
     
-Ask a question about one of these dimensions that hasn't been covered yet: {remaining_dims}
+    decision_prompt = f"""You are helping a user find their ideal NYC neighborhood. 
 
-Return JSON in this exact format:
+Conversation so far: {history}
+
+Questions asked so far: {req.questions_asked}
+Dimensions covered: {list(dims_covered)}
+Dimensions NOT yet covered: {remaining_dims}
+
+Your job: Decide if you have ENOUGH information to recommend neighborhoods, or if you need to ask more questions.
+
+GUIDELINES:
+- If the user gave very detailed preferences (mentioned 3+ factors), you might be ready after 1-2 questions
+- If the user was vague, ask more questions (but never more than 10 total)
+- You should cover at least 3 important dimensions before showing results
+- Prioritize: Safety, Commute, Amenities, Noise as most important to clarify
+
+Return JSON in this EXACT format:
 {{
-    "dimension": "<dimension name from the list>",
-    "question": "<your question>",
+    "decision": "ask_question" or "show_results",
+    "reasoning": "brief explanation",
+    "confidence": 0.0 to 1.0,
+    "dimension": "<dimension to ask about if decision is ask_question>",
+    "question": "<your follow-up question if decision is ask_question>",
     "options": ["Very Important", "Important", "Neutral", "Not Important", "Not Applicable"]
-}}"""
+}}
+
+If confidence >= 0.7 and at least 2 questions asked, you can show results.
+If confidence < 0.5 or questions_asked < 2, you should ask more questions.
+"""
     
-    question_data = engine.call_gemini(q_prompt)
+    decision = engine.call_gemini(decision_prompt)
     
-    if question_data and "question" in question_data:
-        # Ensure dimension is set
-        if "dimension" not in question_data and remaining_dims:
-            question_data["dimension"] = detect_dimension_from_question(question_data["question"]) or remaining_dims[0]
-        
-        # Ensure options exist
-        if "options" not in question_data:
-            question_data["options"] = ["Very Important", "Important", "Neutral", "Not Important", "Not Applicable"]
-        
-        history.append({"role": "assistant", "content": question_data["question"]})
+    # Default to showing results if Gemini returns empty/error
+    if not decision:
+        results = engine.get_top_neighborhoods(df, current_weights, top_n=10)
         return ChatResponse(
             weights=current_weights,
             conversation_history=history,
-            questions_asked=req.questions_asked + 1,
+            questions_asked=req.questions_asked,
             dimensions_covered=list(dims_covered),
-            next_step="ask_question",
-            question=question_data
+            next_step="show_results",
+            results=results
         )
     
-    # Fallback to results if Gemini fails to make a question
-    results = engine.get_top_neighborhoods(df, current_weights, top_n=10)
+    # Check Gemini's decision
+    should_show_results = decision.get("decision") == "show_results"
+    confidence = decision.get("confidence", 0.5)
+    
+    # Force more questions if too few asked and low confidence
+    if req.questions_asked < 2 and confidence < 0.8:
+        should_show_results = False
+    
+    # Force results if high confidence and reasonable questions asked
+    if confidence >= 0.85 and req.questions_asked >= 2:
+        should_show_results = True
+    
+    if should_show_results:
+        results = engine.get_top_neighborhoods(df, current_weights, top_n=10)
+        return ChatResponse(
+            weights=current_weights,
+            conversation_history=history,
+            questions_asked=req.questions_asked,
+            dimensions_covered=list(dims_covered),
+            next_step="show_results",
+            results=results
+        )
+    
+    # 5. Generate/Use the question from Gemini's decision
+    question_data = {
+        "dimension": decision.get("dimension") or (remaining_dims[0] if remaining_dims else "Safety"),
+        "question": decision.get("question", "What else matters to you in a neighborhood?"),
+        "options": decision.get("options", ["Very Important", "Important", "Neutral", "Not Important", "Not Applicable"])
+    }
+    
+    # Validate dimension
+    if not question_data["dimension"] and remaining_dims:
+        question_data["dimension"] = detect_dimension_from_question(question_data["question"]) or remaining_dims[0]
+    
+    history.append({"role": "assistant", "content": question_data["question"]})
+    
     return ChatResponse(
         weights=current_weights,
         conversation_history=history,
-        questions_asked=req.questions_asked,
+        questions_asked=req.questions_asked + 1,
         dimensions_covered=list(dims_covered),
-        next_step="show_results",
-        results=results,
-        question=None
+        next_step="ask_question",
+        question=question_data
     )

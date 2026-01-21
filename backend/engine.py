@@ -6,7 +6,7 @@ from google import genai
 # ============================================================
 # CONFIG & MAPPING
 # ============================================================
-API_KEY = "AIzaSyBXRhNF8v9QSCInQ8k3AVzKAMT-iYLa9WU"
+API_KEY = "AIzaSyAvw2-ReZ2fQRm8BaUVa1xWkJBF7eTEEUI"
 client = genai.Client(api_key=API_KEY)
 
 # Map the AI names to your CSV column names

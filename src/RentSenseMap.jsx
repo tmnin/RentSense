@@ -1,6 +1,115 @@
 import React, { useState, useEffect } from 'react';
 import { MapContainer, TileLayer, GeoJSON, useMap } from 'react-leaflet';
 
+// Tooltip CSS override
+const tooltipStyles = `
+  .custom-tooltip {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3) !important;
+    padding: 0 !important;
+    border-radius: 12px !important;
+  }
+  .custom-tooltip::before {
+    display: none !important;
+  }
+  .leaflet-tooltip-content {
+    margin: 0 !important;
+  }
+`;
+
+// Location/Landmark to nearby neighborhoods mapping
+const LOCATION_BOOSTS = {
+  // Columbia University area
+  columbia: {
+    keywords: ['columbia', 'columbia university', 'morningside', '10027', '10025'],
+    neighborhoods: [
+      'Morningside Heights', 'Hamilton Heights-Sugar Hill', 'Central Harlem (North)',
+      'Central Harlem (South)', 'Manhattanville', 'West Harlem', 'Washington Heights',
+      'Upper West Side', 'Upper West Side (Central)', 'Upper West Side-Lincoln Square'
+    ],
+    boost: 1.25 // 25% boost
+  },
+  // NYU area
+  nyu: {
+    keywords: ['nyu', 'new york university', 'greenwich', 'washington square', '10003', '10012'],
+    neighborhoods: [
+      'Greenwich Village', 'East Village', 'West Village', 'NoHo', 'SoHo',
+      'SoHo-Little Italy-Hudson Square', 'Chinatown-Two Bridges', 'Lower East Side'
+    ],
+    boost: 1.25
+  },
+  // Wall Street / Financial District
+  wallstreet: {
+    keywords: ['wall street', 'financial district', 'fidi', 'downtown', 'battery park', '10004', '10005', '10006', '10007'],
+    neighborhoods: [
+      'Financial District-Battery Park City', 'Tribeca-Civic Center', 'Chinatown-Two Bridges',
+      'SoHo-Little Italy-Hudson Square', 'Lower East Side'
+    ],
+    boost: 1.25
+  },
+  // Midtown
+  midtown: {
+    keywords: ['midtown', 'times square', 'herald square', 'penn station', 'grand central', '10018', '10019', '10020', '10036'],
+    neighborhoods: [
+      'Midtown South-Flatiron-Union Square', 'Midtown-Times Square', 'Hudson Yards-Penn Station-Chelsea',
+      'Murray Hill-Kips Bay', 'Clinton-Hell\'s Kitchen (South)', 'Clinton-Hell\'s Kitchen (North)'
+    ],
+    boost: 1.25
+  },
+  // Brooklyn Tech Hub
+  brooklyn_tech: {
+    keywords: ['dumbo', 'brooklyn tech', 'downtown brooklyn', 'williamsburg tech'],
+    neighborhoods: [
+      'DUMBO-Vinegar Hill-Downtown Brooklyn-Boerum Hill', 'Brooklyn Heights-Cobble Hill',
+      'Fort Greene', 'Clinton Hill', 'Williamsburg (North Side)', 'Williamsburg (South Side)'
+    ],
+    boost: 1.25
+  },
+  // Central Park area
+  central_park: {
+    keywords: ['central park', 'park view', 'near the park'],
+    neighborhoods: [
+      'Upper West Side (Central)', 'Upper West Side-Lincoln Square', 'Upper East Side-Lenox Hill',
+      'Upper East Side-Yorkville', 'Central Harlem (South)', 'East Harlem (North)', 'East Harlem (South)'
+    ],
+    boost: 1.20
+  },
+  // JFK Airport
+  jfk: {
+    keywords: ['jfk', 'jfk airport', 'jamaica', 'howard beach'],
+    neighborhoods: [
+      'Jamaica', 'South Jamaica', 'Jamaica Hills-Briarwood', 'Ozone Park', 
+      'Howard Beach-Lindenwood', 'Rosedale', 'Springfield Gardens'
+    ],
+    boost: 1.25
+  },
+  // LaGuardia Airport
+  laguardia: {
+    keywords: ['laguardia', 'lga', 'laguardia airport'],
+    neighborhoods: [
+      'Astoria (Central)', 'Astoria (North)-Ditmars-Steinway', 'Jackson Heights',
+      'East Elmhurst', 'Flushing-Willets Point', 'Corona'
+    ],
+    boost: 1.25
+  }
+};
+
+// Detect location from user input
+const detectLocation = (text) => {
+  if (!text) return null;
+  const lowerText = text.toLowerCase();
+  
+  for (const [key, config] of Object.entries(LOCATION_BOOSTS)) {
+    for (const keyword of config.keywords) {
+      if (lowerText.includes(keyword)) {
+        return key;
+      }
+    }
+  }
+  return null;
+};
+
 // Weight configuration
 const weightConfig = {
   commute: { label: "Commute", icon: "🚇" },
@@ -76,6 +185,9 @@ export default function RentSenseMap() {
   const [selectedOptions, setSelectedOptions] = useState([]);
   const [backendResults, setBackendResults] = useState(null);
   const [mode, setMode] = useState('discovery'); // 'discovery' or 'migration'
+  
+  // Location boost state
+  const [detectedLocation, setDetectedLocation] = useState(null);
 
   useEffect(() => {
     fetch('/nta.geojson')
@@ -110,7 +222,7 @@ export default function RentSenseMap() {
 
   useEffect(() => {
     if (neighborhoods.length > 0) setGeoJsonKey(prev => prev + 1);
-  }, [userWeights]);
+  }, [userWeights, detectedLocation]);
 
   const getColor = (score) => {
     if (score > 0.8) return '#059669';
@@ -122,7 +234,8 @@ export default function RentSenseMap() {
 
   const getStyle = (feature) => {
     const scores = generateScores(feature.properties.nta2020);
-    const score = calculateScore(scores, userWeights);
+    const baseScore = calculateScore(scores, userWeights);
+    const score = calculateScoreWithBoost(feature.properties.ntaname, baseScore);
     return {
       fillColor: getColor(score),
       weight: 2,
@@ -134,19 +247,26 @@ export default function RentSenseMap() {
 
   const onEachFeature = (feature, layer) => {
     const scores = generateScores(feature.properties.nta2020);
-    const score = calculateScore(scores, userWeights);
+    const baseScore = calculateScore(scores, userWeights);
+    const score = calculateScoreWithBoost(feature.properties.ntaname, baseScore);
+    const hasBoost = score > baseScore;
     
     const ntaName = feature.properties.ntaname;
     const boroName = feature.properties.boroname || '';
     
     layer.bindTooltip(`
-      <div style="font-family: system-ui, sans-serif; padding: 8px; min-width: 150px;">
-        <div style="font-weight: 700; font-size: 16px; color: #1f2937; margin-bottom: 4px;">${ntaName}</div>
-        <div style="color: #6b7280; font-size: 14px; margin-bottom: 8px;">${boroName}</div>
-        <div style="font-size: 28px; font-weight: 800; color: #059669;">${(score * 100).toFixed(1)}</div>
-        <div style="font-size: 12px; color: #9ca3af;">Match Score</div>
+      <div style="font-family: system-ui, sans-serif; padding: 12px; min-width: 160px; background: #1e293b; border-radius: 12px;">
+        <div style="font-weight: 700; font-size: 15px; color: #ffffff; margin-bottom: 4px;">${ntaName}${hasBoost ? ' 📍' : ''}</div>
+        <div style="color: #94a3b8; font-size: 13px; margin-bottom: 10px;">${boroName}</div>
+        <div style="font-size: 32px; font-weight: 800; color: #10b981; line-height: 1;">${(score * 100).toFixed(1)}</div>
+        <div style="font-size: 12px; color: #64748b;">Match Score${hasBoost ? ' (Near your location!)' : ''}</div>
       </div>
-    `, { permanent: false, className: 'custom-tooltip' });
+    `, { 
+      permanent: false, 
+      className: 'custom-tooltip',
+      direction: 'top',
+      offset: [0, -10]
+    });
 
     layer.on({
       click: () => {
@@ -156,42 +276,34 @@ export default function RentSenseMap() {
     });
   };
 
-  // Filter by budget and sort - use backend results if available
-  const sortedNeighborhoods = React.useMemo(() => {
-    if (backendResults && backendResults.length > 0) {
-      return backendResults.map((r, i) => {
-        // Try to find matching neighborhood from GeoJSON for coordinates
-        const ntaCode = r.nta2020 || r.NTA2020 || '';
-        const matchedHood = neighborhoods.find(n => n.id === ntaCode);
-        
-        return {
-          id: ntaCode || `result-${i}`,
-          name: r.ntaname || r.NTAName || r.neighborhood || 'Unknown',
-          borough: r.boroname || r.Borough || r.borough || 'NYC',
-          totalScore: r.fit_index || r.score || 0,
-          rent: r.median_rent || r.rent || 3500,
-          listings: r.listings || 30,
-          center: matchedHood?.center || [40.7128, -74.006],
-          scores: {
-            commute: r.commute_score || 0.7,
-            safety: r.safety_score || 0.7,
-            noise: r.quiet_score || 0.7,
-            amenities: r.amenities_score || 0.7,
-            greenSpace: r.parks_score || 0.7,
-            jobs: r.jobs_score || 0.7,
-            education: r.schools_score || 0.7,
-            political: r.politics_score || 0.7
-          }
-        };
-      });
-    }
+  // Filter by budget and sort - always use consistent frontend scoring
+  // Calculate score with location boost
+  const calculateScoreWithBoost = (neighborhoodName, baseScore) => {
+    if (!detectedLocation) return baseScore;
     
+    const locationConfig = LOCATION_BOOSTS[detectedLocation];
+    if (!locationConfig) return baseScore;
+    
+    // Check if neighborhood is in the boost list (partial match)
+    const isNearby = locationConfig.neighborhoods.some(n => 
+      neighborhoodName?.toLowerCase().includes(n.toLowerCase()) ||
+      n.toLowerCase().includes(neighborhoodName?.toLowerCase())
+    );
+    
+    return isNearby ? baseScore * locationConfig.boost : baseScore;
+  };
+
+  const sortedNeighborhoods = React.useMemo(() => {
     return [...neighborhoods]
-      .map(n => ({ ...n, totalScore: calculateScore(n.scores, userWeights) }))
+      .map(n => {
+        const baseScore = calculateScore(n.scores, userWeights);
+        const boostedScore = calculateScoreWithBoost(n.name, baseScore);
+        return { ...n, totalScore: boostedScore, hasLocationBoost: boostedScore > baseScore };
+      })
       .filter(n => n.rent >= budgetMin && n.rent <= budgetMax)
       .sort((a, b) => b.totalScore - a.totalScore)
       .slice(0, 10);
-  }, [backendResults, neighborhoods, userWeights, budgetMin, budgetMax]);
+  }, [neighborhoods, userWeights, budgetMin, budgetMax, detectedLocation]);
 
   // Map frontend weight names to backend format
   const mapToBackendWeights = (weights) => {
@@ -236,6 +348,13 @@ export default function RentSenseMap() {
     const userMessage = chatInput;
     setChatInput('');
     setIsLoading(true);
+    
+    // Detect location from user input
+    const location = detectLocation(userMessage);
+    if (location) {
+      setDetectedLocation(location);
+      console.log('Detected location:', location, LOCATION_BOOSTS[location]);
+    }
     
     // Add user message to chat
     setChatMessages(prev => [...prev, { role: 'user', content: userMessage }]);
@@ -382,6 +501,7 @@ export default function RentSenseMap() {
     setCurrentQuestion(null);
     setSelectedOptions([]);
     setBackendResults(null);
+    setDetectedLocation(null);
     setUserWeights({
       commute: 1, safety: 1, noise: 1, amenities: 1,
       greenSpace: 1, jobs: 1, education: 1, political: 1
@@ -420,6 +540,9 @@ export default function RentSenseMap() {
       background: '#f9fafb',
       fontFamily: "'Inter', system-ui, -apple-system, sans-serif"
     }}>
+      {/* Inject tooltip styles */}
+      <style>{tooltipStyles}</style>
+      
       {/* HEADER */}
       <header style={{
         display: 'flex',
@@ -1001,12 +1124,10 @@ export default function RentSenseMap() {
             background: '#fff'
           }}>
             <h2 style={{ fontSize: '24px', fontWeight: '700', color: '#1f2937', margin: '0 0 4px' }}>
-              {backendResults ? '🎯 Your Top Matches' : 'Top Matches'}
+              🎯 Your Top Matches
             </h2>
             <p style={{ fontSize: '15px', color: '#6b7280', margin: 0 }}>
-              {backendResults 
-                ? `${sortedNeighborhoods.length} AI-personalized recommendations`
-                : `${sortedNeighborhoods.length} neighborhoods in your budget`}
+              {sortedNeighborhoods.length} neighborhoods matched to your preferences
             </p>
           </div>
 
@@ -1083,8 +1204,18 @@ export default function RentSenseMap() {
                     </div>
                   </div>
 
-                  <h4 style={{ fontSize: '20px', fontWeight: '700', color: '#1f2937', margin: '0 0 4px' }}>
+                  <h4 style={{ fontSize: '20px', fontWeight: '700', color: '#1f2937', margin: '0 0 4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
                     {hood.name}
+                    {hood.hasLocationBoost && (
+                      <span style={{
+                        fontSize: '11px',
+                        background: '#dbeafe',
+                        color: '#1d4ed8',
+                        padding: '2px 8px',
+                        borderRadius: '12px',
+                        fontWeight: '600'
+                      }}>📍 Near you</span>
+                    )}
                   </h4>
                   <p style={{ fontSize: '15px', color: '#6b7280', margin: '0 0 16px' }}>
                     {hood.borough}
